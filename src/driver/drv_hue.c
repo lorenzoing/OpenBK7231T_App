@@ -48,36 +48,38 @@ const  char *hue_resp = "HTTP/1.1 200 OK\r\n"
 static const char *hue_resp_st[] = {
 	"ST: upnp:rootdevice\r\nUSN: uuid:%s::upnp:rootdevice\r\n\r\n",
 	"ST: uuid:%s\r\nUSN: uuid:%s\r\n\r\n",
-	"ST: urn:schemas-upnp-org:device:basic:1\r\nUSN: uuid:%s\r\n\r\n",
+	"ST: urn:schemas-upnp-org:device:Basic:1\r\nUSN: uuid:%s::urn:schemas-upnp-org:device:Basic:1\r\n\r\n",
 };
 
 void DRV_HUE_Send_Advert_To(struct sockaddr_in *addr) {
-	int i;
+    int i;
 
-	if (g_uid[0] == 0) {
-		// not running
-		return;
-	}
-
-	stat_searchesReceived++;
-
-	if (buffer_out == 0) {
-		outBufferLen = strlen(hue_resp) + 256;
-		buffer_out = (char*)malloc(outBufferLen);
-		if (buffer_out == 0)
-			return;
-	}
-	// ARGUMENTS: first IP, then bridgeID
-	snprintf(buffer_out, outBufferLen, hue_resp, HAL_GetMyIPString(), g_bridgeID);
-	for (i = -1; i < 3; i++) {
-		if (i >= 0)
-			snprintf(buffer_out, outBufferLen, hue_resp_st[i], g_uid, g_uid);
-		addLogAdv(LOG_ALL, LOG_FEATURE_HTTP, "HUE - Sending %s", buffer_out);
-		DRV_SSDP_SendReply(addr, buffer_out);
-	}
+    if (g_uid[0] == 0) {
+        return; // Hue no inicializado
+    }
+    stat_searchesReceived++;
+    if (buffer_out == 0) {
+        outBufferLen = 768;
+        buffer_out = (char*)malloc(outBufferLen);
+        if (buffer_out == 0)
+            return;
+    }
+    // CORRECCIÓN: una respuesta SSDP íntegra por datagrama UDP.
+    // Anteriormente se enviaba la cabecera por separado del ST/USN.
+    for (i = 0; i < 3; i++) {
+        int headerLen = snprintf(buffer_out, outBufferLen, hue_resp,
+            HAL_GetMyIPString(), g_bridgeID);
+        int suffixLen;
+        if (headerLen < 0 || headerLen >= outBufferLen)
+            return;
+        suffixLen = snprintf(buffer_out + headerLen,
+            outBufferLen - headerLen, hue_resp_st[i], g_uid, g_uid);
+        if (suffixLen < 0 || suffixLen >= outBufferLen - headerLen)
+            return;
+        addLogAdv(LOG_ALL, LOG_FEATURE_HTTP, "HUE - Sending %s", buffer_out);
+        DRV_SSDP_SendReply(addr, buffer_out);
+    }
 }
-
-
 void HUE_AppendInformationToHTTPIndexPage(http_request_t* request, int bPreState) {
 	if(bPreState)
 		return;
@@ -274,7 +276,7 @@ static void HUE_PostLight(http_request_t* request, const hueLight_t *light, int 
 	{
 		hprintf255(request, "{\"state\":{\"on\":%s,\"alert\":\"none\",\"reachable\":true},",
 			CHANNEL_Get(light->channel) ? "true" : "false");
-		type = "On/Off plug-in unit";
+		type = "On/Off light";
 		modelid = "LOM001";
 		// one relay: the device's name; several: the channel label, or the device name plus a number
 		if (CHANNEL_HasLabel(light->channel))
@@ -316,7 +318,7 @@ static void HUE_PostConfig(http_request_t* request) {
 	hprintf255(request, "\"UTC\":\"2024-01-01T00:00:00\",\"whitelist\":{\"%s\":{\"last use date\":\"2024-01-01T00:00:00\","
 		"\"create date\":\"2024-01-01T00:00:00\",\"name\":\"Remote\"}},", g_userID);
 	poststr(request, "\"swversion\":\"01041302\",\"apiversion\":\"1.17.0\",\"swupdate\":{\"updatestate\":0,\"url\":\"\","
-		"\"text\":\"\",\"notify\":false},\"linkbutton\":false,\"portalservices\":false}");
+		"\"text\":\"\",\"notify\":false},\"linkbutton\":true,\"portalservices\":false}");
 }
 
 static int HUE_Reply_Json(http_request_t* request, void (*body)(http_request_t*)) {

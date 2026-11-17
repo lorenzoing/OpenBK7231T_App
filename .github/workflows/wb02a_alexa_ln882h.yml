@@ -1,0 +1,43 @@
+name: WB02A Alexa LN882H (Hue experimental)
+
+on:
+  push:
+    branches:
+      - wb02a-hue-corregido
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compile-ln882h:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Preparar repositorio
+        uses: actions/checkout@v4
+
+      - name: Instalar dependencias del LN882H
+        uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: cmake srecord
+          version: 1.0
+
+      - name: Instalar compilador ARM
+        uses: carlosperate/arm-none-eabi-gcc-action@v1
+        with:
+          release: 10.3-2021.10
+          path-env-var: ARM_NONE_EABI_GCC_PATH
+
+      - name: Compilar OTA para LN882H
+        shell: bash
+        run: |
+          make APP_VERSION=wb02a_huefix APP_NAME=OpenLN882H VARIANT=default OpenLN882H
+          test -s output/wb02a_huefix/OpenLN882H_wb02a_huefix_OTA.bin
+          sha256sum output/wb02a_huefix/OpenLN882H_wb02a_huefix_OTA.bin
+
+      - name: Entregar firmware OTA de prueba
+        uses: actions/upload-artifact@v4
+        with:
+          name: WB02A_HueFix_LN882H
+          path: output/wb02a_huefix/OpenLN882H_wb02a_huefix_OTA.bin
+          if-no-files-found: error

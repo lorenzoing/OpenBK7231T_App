@@ -1,0 +1,128 @@
+name: WB02A Alexa LN882H (Hue experimental)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compile-ln882h:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Preparar repositorio
+        uses: actions/checkout@v4
+
+      - name: Obtener OpenBeken PR 2283 con 4 relés
+        shell: bash
+        run: |
+          git fetch --depth=1 https://github.com/openshwprojects/OpenBK7231T_App.git refs/pull/2283/merge
+          git checkout --force FETCH_HEAD
+          test -f src/driver/drv_hue.c
+
+      - name: Aplicar correcciones de SSDP / Alexa
+        shell: bash
+        run: |
+          cat > /tmp/aplicar_fix.py <<'PYTHON_PATCH'
+          #!/usr/bin/env python3
+          """Parche experimental de Hue para OpenBeken PR #2283.
+          
+          Corrige las respuestas SSDP fragmentadas, tipifica relés como On/Off light,
+          y publica linkbutton=true. Ejecutar en la raíz del código fuente.
+          No modifica ni flashea dispositivos.
+          """
+          from pathlib import Path
+          import sys
+          
+          file = Path('src/driver/drv_hue.c')
+          if not file.is_file():
+              sys.exit('ERROR: ejecutar desde la raíz de OpenBK7231T_App (no existe src/driver/drv_hue.c)')
+          src = file.read_text(encoding='utf-8')
+          start_tag = 'void DRV_HUE_Send_Advert_To(struct sockaddr_in *addr) {'
+          end_tag = '\nvoid HUE_AppendInformationToHTTPIndexPage('
+          if src.count(start_tag) != 1 or src.count(end_tag) != 1:
+              sys.exit('ERROR: versión fuente no compatible; no se aplicó el cambio')
+          a = src.index(start_tag)
+          b = src.index(end_tag, a)
+          old = src[a:b]
+          if 'for (i = -1; i < 3; i++)' not in old or 'DRV_SSDP_SendReply(addr, buffer_out)' not in old:
+              sys.exit('ERROR: el bloque de SSDP ha cambiado; no se aplicó el parche')
+          new = '''void DRV_HUE_Send_Advert_To(struct sockaddr_in *addr) {
+              int i;
+          
+              if (g_uid[0] == 0) {
+                  return; // Hue no inicializado
+              }
+              stat_searchesReceived++;
+              if (buffer_out == 0) {
+                  outBufferLen = 768;
+                  buffer_out = (char*)malloc(outBufferLen);
+                  if (buffer_out == 0)
+                      return;
+              }
+              // CORRECCIÓN: una respuesta SSDP íntegra por datagrama UDP.
+              // Anteriormente se enviaba la cabecera por separado del ST/USN.
+              for (i = 0; i < 3; i++) {
+                  int headerLen = snprintf(buffer_out, outBufferLen, hue_resp,
+                      HAL_GetMyIPString(), g_bridgeID);
+                  int suffixLen;
+                  if (headerLen < 0 || headerLen >= outBufferLen)
+                      return;
+                  suffixLen = snprintf(buffer_out + headerLen,
+                      outBufferLen - headerLen, hue_resp_st[i], g_uid, g_uid);
+                  if (suffixLen < 0 || suffixLen >= outBufferLen - headerLen)
+                      return;
+                  addLogAdv(LOG_ALL, LOG_FEATURE_HTTP, "HUE - Sending %s", buffer_out);
+                  DRV_SSDP_SendReply(addr, buffer_out);
+              }
+          }'''
+          src = src[:a] + new + src[b:]
+          # La PR #2280, probada en hardware, anuncia sus relés como On/Off light.
+          old_type = 'type = "On/Off plug-in unit";'
+          if src.count(old_type) != 1:
+              sys.exit('ERROR: no se pudo localizar el tipo de dispositivo; no se escribió nada')
+          src = src.replace(old_type, 'type = "On/Off light";', 1)
+          # Echo solicita alta de puente Hue; PR #2280 responde linkbutton=true.
+          old_button = '\\"linkbutton\\":false'
+          if src.count(old_button) != 1:
+              sys.exit('ERROR: no se pudo localizar linkbutton; no se escribió nada')
+          src = src.replace(old_button, '\\"linkbutton\\":true', 1)
+          # Respuesta SSDP con ST/USN correctos para device:Basic:1.
+          old_st = '"ST: urn:schemas-upnp-org:device:basic:1\\r\\nUSN: uuid:%s\\r\\n\\r\\n",'
+          new_st = '"ST: urn:schemas-upnp-org:device:Basic:1\\r\\nUSN: uuid:%s::urn:schemas-upnp-org:device:Basic:1\\r\\n\\r\\n",'
+          if src.count(old_st) != 1:
+              sys.exit('ERROR: no se pudo localizar el anuncio Basic:1; no se escribió nada')
+          src = src.replace(old_st, new_st, 1)
+          file.write_text(src, encoding='utf-8')
+          print('OK: parche experimental SSDP + On/Off light + linkbutton aplicado.')
+          print('Archivo:', file)
+          PYTHON_PATCH
+          python3 /tmp/aplicar_fix.py
+          git diff --check
+          git diff -- src/driver/drv_hue.c
+
+      - name: Instalar dependencias del LN882H
+        uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: cmake srecord
+          version: 1.0
+
+      - name: Instalar compilador ARM
+        uses: carlosperate/arm-none-eabi-gcc-action@v1
+        with:
+          release: 10.3-2021.10
+          path-env-var: ARM_NONE_EABI_GCC_PATH
+
+      - name: Compilar OTA para LN882H
+        shell: bash
+        run: |
+          make APP_VERSION=wb02a_huefix APP_NAME=OpenLN882H VARIANT=default OpenLN882H
+          test -s output/wb02a_huefix/OpenLN882H_wb02a_huefix_OTA.bin
+          sha256sum output/wb02a_huefix/OpenLN882H_wb02a_huefix_OTA.bin
+
+      - name: Entregar firmware OTA de prueba
+        uses: actions/upload-artifact@v4
+        with:
+          name: WB02A_HueFix_LN882H
+          path: output/wb02a_huefix/OpenLN882H_wb02a_huefix_OTA.bin
+          if-no-files-found: error
